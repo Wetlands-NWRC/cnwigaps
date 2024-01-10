@@ -89,95 +89,54 @@ class DataManifest:
         return manifest[["file_path", "ECOREGION_ID", "type", "ECOZONE_ID"]]
 
 
-class DataProcessor:
-    """
-    Represents a data processor that performs various operations on shapefile data.
-    """
+def process_data_manifest(manifest: DataManifest):
+    n_rows = 10_000
+    # load data
+    output = {}
+    for _, group in manifest:
+        # sub rouitne that loads the data befor moving to processing
+        ## Load data
+        tmp, tmp_r = [], []
+        for idx, row in group.iterrows():
+            if row["type"] == 1 or row["type"] == 2:
+                gdf = gpd.read_file(row["file_path"])
+                gdf["type"] = row["type"]
+                gdf["ECOZONE_ID"] = row["ECOZONE_ID"]
+                tmp.append(gdf)
+            if row["type"] == 3:
+                gdf = gpd.read_file(row["file_path"])
+                gdf["type"] = row["type"]
+                gdf["ECOZONE_ID"] = row["ECOZONE_ID"]
+                tmp_r.append(gdf)
+        ## Process data
 
-    def __init__(self, manifest: DataManifest):
-        """
-        Initializes a DataProcessor object.
+        ### Processing for training and validation data
+        gdf = gpd.GeoDataFrame(pd.concat(tmp))
+        gdf.to_crs(epsg=4326, inplace=True)
 
-        Args:
-            manifest (DataManifest): The data manifest.
-        """
-        self.manifest = manifest
-        self.training = {}
-        self.regions = {}
+        labels = gdf["class_name"].unique().tolist()
+        int_labels = list(range(1, len(labels) + 1))
 
-    def load_files(self):
-        """
-        Loads the shapefile data.
-        """
-        for idx, group in self.manifest:
-            # training_files
-            tmp = []
-            for _, row in group.iterrows():
-                if row["type"] == 1 or row["type"] == 2:
-                    pass
+        label_map = dict(zip(labels, int_labels))
+        gdf["class_name"] = gdf["class_name"].map(label_map)
 
-    def convert_crs(self):
-        """
-        Converts the coordinate reference system (CRS) of the shapefile data.
-        """
-        pass
+        # target number of observations per class
+        n = n_rows // len(gdf["class_name"].unique().tolist())
 
-    def combine_data(self):
-        """
-        Combines the shapefile data into a single geopandas dataframe.
-        """
-        pass
+        # if any class has n observations less then the target use that value for all labels
+        grouped_counts = gdf.groupby("class_name").size().reset_index(name="Count")
+        min_count = grouped_counts["Count"].min()
 
-    def get_lookup(self, column: str):
-        """
-        Gets a lookup dictionary for a specific column in the shapefile data.
+        if n > min_count:
+            n = min_count
 
-        Args:
-            column (str): The column name.
+        selected = gdf.groupby("class_name").sample(n=n)
+        selected = selected.reset_index(drop=True)
 
-        Returns:
-            dict: The lookup dictionary.
-        """
-        pass
+        ### Processing for region data
+        gdf_r = gpd.GeoDataFrame(pd.concat(tmp_r))
+        gdf_r.to_crs(epsg=4326, inplace=True)
+        gdf_r = gdf_r.dissolve(by="ECOZONE_ID")
 
-    def remap_labels(self, label_col: str, lookup: dict[str, str] = None):
-        """
-        Remaps labels in a specific column of the shapefile data using a lookup dictionary.
-
-        Args:
-            label_col (str): The column name containing the labels.
-            lookup (dict[str, str], optional): The lookup dictionary. Defaults to None.
-        """
-        pass
-
-    def process(self):
-        """
-        Processes the shapefile data.
-        """
-        pass
-
-
-def mk_data_manifest(data_dir: str) -> pd.DataFrame:
-    """
-    Creates a data manifest.
-
-    Args:
-        data_dir (str): The directory path containing the shapefiles.
-
-    Returns:
-        pd.DataFrame: The data manifest.
-    """
-    pass
-
-
-def process_data_manifest(data_manifest: pd.DataFrame) -> gpd.GeoDataFrame:
-    """
-    Processes the data manifest.
-
-    Args:
-        data_manifest (pd.DataFrame): The data manifest.
-
-    Returns:
-        gpd.GeoDataFrame: The processed data.
-    """
-    pass
+        output[idx] = {"t": selected, "r": gdf_r}
+    return output
