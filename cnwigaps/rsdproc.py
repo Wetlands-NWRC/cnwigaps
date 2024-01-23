@@ -221,13 +221,77 @@ class DEMProc:
         return img.select("elevation").addBands(ee.Terrain.slope(img))
 
 
-class Processor:
-    """class for processing multiple datasets"""
+class ProcessingFactory:
+    DATE_MAP = {
+        "2018": ("2018-06-01", "2018-08-31"),
+        "2019": ("2019-06-01", "2019-08-31"),
+        "2020": ("2020-06-01", "2020-08-31"),
+    }
 
-    def __init__(self, datasets: list[RSDProcessor]) -> None:
-        self.datasets = datasets
+    @staticmethod
+    def _process_s1(region: ee.Geometry, date: tuple[str, str]) -> RSDProcessor:
+        return S1Proc(start_date=date[0], end_date=date[1], region=region).process()
 
-    def process(self) -> Processor:
-        for dataset in self.datasets:
-            dataset.process()
-        return self
+    @staticmethod
+    def _process_s2(region: ee.Geometry, date: tuple[str, str]) -> RSDProcessor:
+        return S2Proc(start_date=date[0], end_date=date[1], region=region).process()
+
+    @staticmethod
+    def _process_alos(region: ee.Geometry, date: tuple[str, str]) -> RSDProcessor:
+        cur_year = date[0].split("-")[0]
+        next_year = str(int(cur_year) + 1)
+
+        return ALOSProc(
+            start_date=cur_year, end_date=next_year, region=region
+        ).process()
+
+    def process_datasets(self, level: int, region: ee.Geometry) -> ee.Image | None:
+        """processes the remote sensing datasets. returns the median of the processed images
+        level 1: S1
+        level 2: S2
+        level 3: ALOS
+        """
+        if level == 1:
+            return (
+                self._process_s1(region, self.DATE_MAP["2018"])
+                .merge(self._process_s1(region, self.DATE_MAP["2019"]))
+                .merge(self._process_s1(region, self.DATE_MAP["2020"]))
+                .rsd.median()
+            )
+        elif level == 2:
+            return (
+                self._process_s2(region, self.DATE_MAP["2018"])
+                .merge(self._process_s2(region, self.DATE_MAP["2019"]))
+                .merge(self._process_s2(region, self.DATE_MAP["2020"]))
+                .rsd.median()
+            )
+        elif level == 3:
+            return (
+                self._process_alos(region, self.DATE_MAP["2018"])
+                .merge(self._process_alos(region, self.DATE_MAP["2019"]))
+                .merge(self._process_alos(region, self.DATE_MAP["2020"]))
+                .rsd.median()
+            )
+        else:
+            return None
+
+
+def remote_sensing_dataset_processing(
+    region: ee.Geometry | ee.FeatureCollection,
+) -> ee.Image:
+    """
+    Process remote sensing datasets for a given region.
+
+    Args:
+        region: The region of interest.
+
+    Returns:
+        An ee.Image object containing the processed datasets.
+    """
+    factory = ProcessingFactory()
+    s1 = factory.process_datasets(1, region)
+    s2 = factory.process_datasets(2, region)
+    alos = factory.process_datasets(3, region)
+    dem = DEMProc().process()
+
+    return ee.Image.cat(s1, s2, alos, dem)
