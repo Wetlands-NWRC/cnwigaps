@@ -16,6 +16,79 @@ class RSDProcessor:
         self.rsd = self.rsd.merge(other.rsd)
         return self
 
+    def merge(self, other: RSDProcessor) -> RSDProcessor:
+        return self.__add__(other)
+
+    def band_selector(self, bands: list[str]) -> RSDProcessor:
+        self.rsd = self.rsd.select(bands)
+        return self
+
+    def add_boxcar(self, size: int) -> RSDProcessor:
+        """creates a boxcar filter"""
+        self.rsd = self.rsd.map(lambda image: image.convolve(ee.Kernel.square(size)))
+        return self
+
+    def compute_ratio(self, band1: str, band2: str) -> RSDProcessor:
+        """computes the ratio of two bands"""
+        band_name = f"{band1}_{band2}"
+        self.rsd = self.rsd.map(
+            lambda image: image.addBands(
+                image.select(band1).divide(image.select(band2)).rename(band_name)
+            )
+        )
+        return self
+
+    def compute_ndvi(self, nir: str, red: str) -> RSDProcessor:
+        """computes ndvi"""
+        self.rsd = self.rsd.map(
+            lambda image: image.addBands(
+                image.normalizedDifference([nir, red]).rename("NDVI")
+            )
+        )
+        return self
+
+    def compute_savi(self, nir: str, red: str) -> RSDProcessor:
+        self.rsd = self.rsd.map(
+            lambda image: image.addBands(
+                image.expression(
+                    "((NIR - RED) / (NIR + RED + 0.5)) * (1.5)",
+                    {"NIR": image.select(nir), "RED": image.select(red)},
+                ).rename("SAVI")
+            )
+        )
+        return self
+
+    def compute_tasseled_cap(self, blue, green, red, nir, swir1, swir2) -> ee.Image:
+        def _compute_tasseled_cap(image: ee.Image) -> ee.Image:
+            coefficients = ee.Array(
+                [
+                    [0.3029, 0.2786, 0.4733, 0.5599, 0.508, 0.1872],
+                    [-0.2941, -0.243, -0.5424, 0.7276, 0.0713, -0.1608],
+                    [0.1511, 0.1973, 0.3283, 0.3407, -0.7117, -0.4559],
+                    [-0.8239, 0.0849, 0.4396, -0.058, 0.2013, -0.2773],
+                    [-0.3294, 0.0557, 0.1056, 0.1855, -0.4349, 0.8085],
+                    [0.1079, -0.9023, 0.4119, 0.0575, -0.0259, 0.0252],
+                ]
+            )
+
+            input_img = image.select([blue, green, red, nir, swir1, swir2])
+            array_image = input_img.toArray()
+            array_image_2d = array_image.toArray(1)
+
+            components = (
+                ee.Image(coefficients)
+                .matrixMultiply(array_image_2d)
+                .arrayProject([0])
+                .arrayFlatten(
+                    [["brightness", "greenness", "wetness", "fourth", "fifth", "sixth"]]
+                )
+            )
+            components = components.select(["brightness", "greenness", "wetness"])
+            return image.addBands(components)
+
+        self.rsd = self.rsd.map(_compute_tasseled_cap)
+        return self
+
     def process(self) -> RSDProcessor:
         """does bare bones processing (date and region)"""
         self.rsd = self.rsd.filterBounds(self.region).filterDate(
@@ -28,15 +101,22 @@ class S1Proc(RSDProcessor):
     def __init__(self, start_date, end_date, region) -> None:
         super().__init__("COPERNICUS/S1_GRD", start_date, end_date, region)
 
-    @staticmethod
-    def ratio(image: ee.Image):
-        return image.addBands(
-            image.select("VV").divide(image.select("VH")).rename("VV_VH")
-        )
+    def filter_iw_mode(self) -> S1Proc:
+        self.rsd = self.rsd.filter(ee.Filter.eq("instrumentMode", "IW"))
+        return self
 
-    @staticmethod
-    def boxcar(image: ee.Image):
-        return image.convolve(ee.Kernel.square(1, "pixels"))
+    def filter_asc(self) -> S1Proc:
+        self.rsd = self.rsd.filter(ee.Filter.eq("orbitProperties_pass", "ASCENDING"))
+        return self
+
+    def filter_vv_vh(self) -> S1Proc:
+        self.rsd = self.rsd.filter(
+            ee.Filter.listContains("transmitterReceiverPolarisation", "VV")
+        )
+        self.rsd = self.rsd.filter(
+            ee.Filter.listContains("transmitterReceiverPolarisation", "VH")
+        )
+        return self
 
     def process(self) -> S1Proc:
         """
@@ -45,16 +125,15 @@ class S1Proc(RSDProcessor):
         Returns:
             S1Proc: The processed SAR data.
         """
-        self.rsd = (
+        (
             super()
             .process()
-            .rsd.filter(ee.Filter.eq("instrumentMode", "IW"))
-            .filter(ee.Filter.eq("orbitProperties_pass", "ASCENDING"))
-            .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
-            .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
-            .select("V.*")
-            .map(self.boxcar)
-            .map(self.ratio)
+            .filter_iw_mode()
+            .filter_asc()
+            .filter_vv_vh()
+            .band_selector(["VV", "VH"])
+            .add_boxcar(1)
+            .compute_ratio("VV", "VH")
         )
         return self
 
@@ -65,82 +144,56 @@ class S2Proc(RSDProcessor):
     def __init__(self, start_date, end_date, region) -> None:
         super().__init__("COPERNICUS/S2_HARMONIZED", start_date, end_date, region)
 
-    @staticmethod
-    def mask_s2_clouds(image: ee.Image) -> ee.Image:
-        """Masks clouds in a Sentinel-2 image using the QA band.
+    def add_cloud_mask(self) -> S1Proc:
+        def mask_s2_clouds(image: ee.Image) -> ee.Image:
+            """Masks clouds in a Sentinel-2 image using the QA band.
+
+            Args:
+                image (ee.Image): A Sentinel-2 image.
+
+            Returns:
+                ee.Image: A cloud-masked Sentinel-2 image.
+            """
+            qa = image.select("QA60")
+
+            # Bits 10 and 11 are clouds and cirrus, respectively.
+            cloud_bit_mask = 1 << 10
+            cirrus_bit_mask = 1 << 11
+
+            # Both flags should be set to zero, indicating clear conditions.
+            mask = (
+                qa.bitwiseAnd(cloud_bit_mask)
+                .eq(0)
+                .And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
+            )
+
+            return image.updateMask(mask)
+
+        self.rsd = self.rsd.map(mask_s2_clouds)
+        return self
+
+    def filter_clouds(self, value: int = 20) -> S2Proc:
+        """Filters out cloudy images.
 
         Args:
-            image (ee.Image): A Sentinel-2 image.
+            value (int, optional): The maximum cloud percentage. Defaults to 20.
 
         Returns:
-            ee.Image: A cloud-masked Sentinel-2 image.
+            S2Proc: The processed Sentinel-2 data.
         """
-        qa = image.select("QA60")
-
-        # Bits 10 and 11 are clouds and cirrus, respectively.
-        cloud_bit_mask = 1 << 10
-        cirrus_bit_mask = 1 << 11
-
-        # Both flags should be set to zero, indicating clear conditions.
-        mask = (
-            qa.bitwiseAnd(cloud_bit_mask)
-            .eq(0)
-            .And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
-        )
-
-        return image.updateMask(mask)
-
-    @staticmethod
-    def ndvi(image: ee.Image) -> ee.Image:
-        return image.addBands(image.normalizedDifference(["B8", "B4"]).rename("NDVI"))
-
-    @staticmethod
-    def savi(image: ee.Image) -> ee.Image:
-        return image.addBands(
-            image.expression(
-                "((NIR - RED) / (NIR + RED + 0.5)) * (1.5)",
-                {"NIR": image.select("B8"), "RED": image.select("B4")},
-            ).rename("SAVI")
-        )
-
-    @staticmethod
-    def tasseled_cap(image: ee.Image) -> ee.Image:
-        coefficients = ee.Array(
-            [
-                [0.3029, 0.2786, 0.4733, 0.5599, 0.508, 0.1872],
-                [-0.2941, -0.243, -0.5424, 0.7276, 0.0713, -0.1608],
-                [0.1511, 0.1973, 0.3283, 0.3407, -0.7117, -0.4559],
-                [-0.8239, 0.0849, 0.4396, -0.058, 0.2013, -0.2773],
-                [-0.3294, 0.0557, 0.1056, 0.1855, -0.4349, 0.8085],
-                [0.1079, -0.9023, 0.4119, 0.0575, -0.0259, 0.0252],
-            ]
-        )
-
-        input_img = image.select(["B2", "B3", "B4", "B8", "B11", "B12"])
-        array_image = input_img.toArray()
-        array_image_2d = array_image.toArray(1)
-
-        components = (
-            ee.Image(coefficients)
-            .matrixMultiply(array_image_2d)
-            .arrayProject([0])
-            .arrayFlatten(
-                [["brightness", "greenness", "wetness", "fourth", "fifth", "sixth"]]
-            )
-        )
-        components = components.select(["brightness", "greenness", "wetness"])
-        return image.addBands(components)
+        self.rsd = self.rsd.filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", value))
+        return self
 
     def process(self) -> S2Proc:
-        self.rsd = (
+        (
             super()
             .process()
-            .rsd.filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
-            .map(self.mask_s2_clouds)
-            .select(self.BANDS)
-            .map(self.ndvi)
-            .map(self.savi)
-            .map(self.tasseled_cap)
+            .filter_clouds(value=20)
+            .add_cloud_mask()
+            .band_selector(self.BANDS)
+            .compute_ndvi("B8", "B4")
+            .compute_savi("B8", "B4")
+            .compute_tasseled_cap("B2", "B3", "B4", "B8", "B11", "B12")
         )
         return self
 
@@ -151,88 +204,30 @@ class ALOSProc(RSDProcessor):
             "JAXA/ALOS/PALSAR/YEARLY/SAR_EPOCH", start_date, end_date, region
         )
 
-    @staticmethod
-    def ratio(image: ee.Image):
-        return image.addBands(
-            image.select("HH").divide(image.select("HV")).rename("HH_HV")
-        )
-
-    @staticmethod
-    def boxcar(image: ee.Image):
-        return image.convolve(ee.Kernel.square(1, "pixels"))
-
     def process(self) -> ALOSProc:
-        self.rsd = super().process().rsd.select("H.*").map(self.boxcar).map(self.ratio)
+        (
+            super()
+            .process()
+            .band_selector(["HH", "HV"])
+            .add_boxcar(1)
+            .compute_ratio("HH", "HV")
+        )
         return self
 
 
-class DEMProc(RSDProcessor):
-    pass
+class DEMProc:
+    def process(self) -> ee.Image:
+        img = ee.Image("NASA/NASADEM_HGT/001")
+        return img.select("elevation").addBands(ee.Terrain.slope(img))
 
 
-def process_rsd(rsd_type: int, start_date: str, end_date: str, region: ee.Geometry):
-    """processes a remote sensing dataset
+class Processor:
+    """class for processing multiple datasets"""
 
-    RSD_MAP = {
-        0: S1Proc,
-        1: S2Proc,
-        2: ALOSProc,
-        3: DEMProc
-    }
+    def __init__(self, datasets: list[RSDProcessor]) -> None:
+        self.datasets = datasets
 
-    Args:
-        rsd_type (int): the type of remote sensing dataset to process
-        start_date (str): the start date of the dataset
-        end_date (str): the end date of the dataset
-        region (ee.Geometry): the region to process the dataset over
-
-    Returns:
-        ee.ImageCollection: the processed remote sensing dataset
-    """
-
-    MAP = {0: S1Proc, 1: S2Proc, 2: ALOSProc, 3: DEMProc}
-    processor = MAP.get(rsd_type, None)
-    if processor is None:
-        raise ValueError("Invalid RSD type")
-    if rsd_type == 3:
-        return processor().process().rsd
-    else:
-        return processor(start_date, end_date, region).process().rsd
-
-
-def batch_process_rsd(
-    rsd_type, years: list[int], start_mm_dd: str, end_mm_dd: str, region
-) -> RSDProcessor:
-    """
-    Batch process remote sensing data.
-
-    Args:
-        rsd_type (int): The type of remote sensing data to process.
-        years (list[int]): List of years to process.
-        start_mm_dd (str): Start date in MM-DD format.
-        end_mm_dd (str): End date in MM-DD format.
-        region: The region to process the data for.
-
-    Returns:
-        RSDProcessor: The processed data.
-
-    Raises:
-        ValueError: If an invalid RSD type is provided.
-    """
-
-    MAP = {0: S1Proc, 1: S2Proc, 2: ALOSProc, 3: DEMProc}
-    processor = MAP.get(rsd_type, None)
-    if processor is None:
-        raise ValueError("Invalid RSD type")
-
-    processed = [
-        processor(f"{year}-{start_mm_dd}", f"{year}-{end_mm_dd}", region).process()
-        for year in years
-    ]
-
-    # combine
-    combined = processed[0]
-    for ds in processed[1:]:
-        combined += ds
-
-    return combined
+    def process(self) -> Processor:
+        for dataset in self.datasets:
+            dataset.process()
+        return self
