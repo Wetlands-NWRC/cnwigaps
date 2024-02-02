@@ -6,9 +6,10 @@ This file contains helper functions for the cnwigaps package.
 - monitor task function
 """
 
+from typing import Any
 import ee
 
-from . import rsdp
+from . import rsdp, model
 
 
 def stack_images(aoi: ee.Geometry):
@@ -21,3 +22,17 @@ def stack_images(aoi: ee.Geometry):
 
 def monitor_task():
     pass
+
+
+def compute_and_asses_model(
+    features: ee.FeatureCollection, **kwargs
+) -> tuple[Any, Any]:
+    pass
+
+
+def extract_features(
+    image: ee.Image, features: ee.FeatureCollection
+) -> ee.FeatureCollection:
+    return image.sampleRegions(
+        collection=features, scale=10, geometries=True, tileScale=16
+    )
