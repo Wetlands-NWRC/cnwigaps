@@ -143,7 +143,7 @@ def s2_dataset(aoi: ee.Geometry, date: tuple[str, str]) -> ee.ImageCollection:
     return dataset
 
 
-def s2_compute_composite(aoi: ee.Geometry) -> ee.Image:
+def compute_s2_composite(aoi: ee.Geometry) -> ee.Image:
     s2_2018 = s2_dataset(aoi, ("2018-06-20", "2018-09-21"))
     s2_2019 = s2_dataset(aoi, ("2019-06-20", "2019-09-21"))
     s2_2020 = s2_dataset(aoi, ("2020-06-20", "2020-09-21"))
