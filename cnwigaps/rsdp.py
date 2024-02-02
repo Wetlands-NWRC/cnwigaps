@@ -154,3 +154,10 @@ def compute_s2_composite(aoi: ee.Geometry) -> ee.Image:
 
 
 ##~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~##
+
+
+# Elevation
+def compute_elevation() -> ee.Image:
+    dem = ee.Image("NASA/NASADEM_HGT/001").select("elevation")
+    slope = ee.Terrain.slope(dem)
+    return dem.addBands(slope)
