@@ -2,95 +2,58 @@ from __future__ import annotations
 import sys
 
 from typing import Any
-from dataclasses import dataclass, InitVar
+from dataclasses import dataclass, InitVar, field
 
 import ee
 
 
 # Remote Sensing Datasets and Processing
-S1 = "COPERNICUS/S1_GRD"
-S2 = "COPERNICUS/S2"
-ALOS = "JAXA/ALOS/PALSAR/YEARLY/SAR_EPOCH"
-DEM = ""
+@dataclass
+class Sentinel1GRD:
+    dataset_id: str = field(default="COPERNICUS/S1_GRD")
+    bands: list = field(default_factory=lambda: ["VV", "VH"])
+    date: list = field(default_factory=lambda: [("2019-03-01", "2019-10-01")])
 
-
-@dataclass(frozen=True)
-class DateRanges:
-    s1 = [("2019-03-01", "2019-10-01")]
-    s2 = [
-        ("2018-03-01", "2018-10-01"),
-        ("2019-03-01", "2019-10-01"),
-        ("2020-03-01", "2020-10-01"),
-    ]
-    alos = [("2018", "2021")]
+    def __post_init__(self):
+        self.dataset = ee.ImageCollection(self.dataset_id)
 
 
 @dataclass
-class S1:
-    dataset: ee.ImageCollection = ee.ImageCollection(S1)
-    bands: list = ["VV", "VH"]
+class Sentinel2TOA:
+    dataset_id: str = field(default="COPERNICUS/S2")
+    bands: list = field(default_factory=lambda: ["B2", "B3", "B4", "B8"])
+    date: list = field(
+        default_factory=lambda: [
+            ("2019-03-01", "2019-10-01"),
+            ("2019-03-01", "2019-10-01"),
+            ("2019-03-01", "2019-10-01"),
+        ]
+    )
 
-
-@dataclass
-class S2:
-    dataset: ee.ImageCollection = ee.ImageCollection(S2)
-    bands: list = ["B2", "B3", "B4", "B8"]
+    def __post_init__(self):
+        self.dataset = ee.ImageCollection(self.dataset_id)
 
 
 @dataclass
 class ALOS:
-    dataset: ee.ImageCollection = ee.ImageCollection(ALOS)
-    bands: list = ["HH", "HV"]
+    dataset_id: str = field(default="JAXA/ALOS/PALSAR/YEARLY/SAR_EPOCH")
+    bands: list = field(default_factory=lambda: ["HH", "HV"])
+    date: list = field(default_factory=lambda: [("2018", "2021")])
+
+    def __post_init__(self):
+        self.dataset = ee.ImageCollection(self.dataset_id)
 
 
 @dataclass
 class DEM:
-    dataset: ee.Image = ee.Image(DEM)
-    bands: list = ["elevation"]
+    dataset_id: str = field(default="USGS/SRTMGL1_003")
+    bands: list = field(default_factory=lambda: ["elevation"])
+
+    def __post_init__(self):
+        self.dataset = ee.Image(self.dataset_id)
 
 
-# Dataset Preprocessing and processing Pipelines
-def s1_preprocessing_pipeline(dataset: S1, aoi, start, end) -> ee.ImageCollection:
-    """Preprocess Sentinel-1 image."""
-
-    # apply preprocessing pipeline
-    dataset.dataset = (
-        dataset.dataset.filterDate(start, end)
-        .filterBounds(aoi)
-        .filter(ee.Filter.eq("instrumentMode", "IW"))
-        .filter(ee.Filter.eq("orbitProperties_pass", "DESCENDING"))
-        .filter(ee.Filter.eq("resolution_meters", 10))
-        .filter(ee.Filter.eq("transmitterReceiverPolarization", ["VV", "VH"]))
-        .select(dataset.bands)
-    )
-
-    return dataset
-
-
-def s2_preprocessing_pipeline(dataset: S2, aoi, start, end) -> ee.ImageCollection:
-    """Preprocess Sentinel-2 image."""
-
-    # apply preprocessing pipeline
-    dataset.dataset = (
-        dataset.dataset.filterDate(start, end)
-        .filterBounds(aoi)
-        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
-        .select(dataset.bands)
-    )
-
-    return dataset
-
-
-def alos_preprocessing_pipeline(dataset: ALOS, aoi, start, end) -> ee.ImageCollection:
-    """Preprocess ALOS image."""
-
-    dataset.dataset = (
-        dataset.dataset.filterDate(start, end).filterBounds(aoi).select(dataset.bands)
-    )
-    return dataset
-
-
-def sar_processing_pipeline(dataset: S1 | ALOS) -> ee.ImageCollection:
+def sar_processing(dataset) -> ee.ImageCollection:
     """Apply processing pipeline to SAR dataset."""
     # apply processing pipeline
     compute_ratio = lambda x: x.select(dataset.bands[0]).divide(
@@ -102,8 +65,29 @@ def sar_processing_pipeline(dataset: S1 | ALOS) -> ee.ImageCollection:
     return dataset
 
 
-def optical_processing_pipeline(dataset: S2) -> ee.ImageCollection:
-    """Apply processing pipeline to Optical dataset."""
+def sentinel_1_processor(rsd, aoi, start, end, bands):
+    compute_ratio = lambda x: x.select("VV").divide(x.select("VH"))
+
+    return (
+        rsd.filterDate(start, end)
+        .filterBounds(aoi)
+        .filter(ee.Filter.eq("instrumentMode", "IW"))
+        .filter(ee.Filter.eq("orbitProperties_pass", "DESCENDING"))
+        .filter(ee.Filter.eq("resolution_meters", 10))
+        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
+        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
+        .select(bands)
+        .map(lambda x: x.convolve(ee.Kernel.square(1)))
+        .map(compute_ratio)
+    )
+
+
+def sentinel_2_processing(rsd, aoi, start, end, bands) -> ee.ImageCollection:
+    """Preprocess Sentinel-2 image."""
+
+    def cloud_mask(img: ee.Image):
+        """Apply cloud mask."""
+        ...
 
     def compute_savi(img: ee.Image):
         """computes soil adjusted vegetation index."""
@@ -113,15 +97,30 @@ def optical_processing_pipeline(dataset: S2) -> ee.ImageCollection:
         """computes tasseled cap transformation."""
         ...
 
-    # apply processing pipeline
-    dataset.dataset = (
-        dataset.dataset.map(
-            lambda x: x.normalizedDifference(["B8", "B4"]).rename("NDVI")
+        # apply preprocessing pipeline
+
+        return (
+            rsd.filterDate(start, end)
+            .filterBounds(aoi)
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
+            .select(bands)
+            .map(cloud_mask)
+            .map(compute_savi)
+            .map(compute_tasseled_cap)
+            .map(lambda x: x.normalizedDifference(["B8", "B4"]).rename("NDVI"))
         )
-        .map(compute_savi)
-        .map(compute_tasseled_cap)
+
+
+def alos_processing(rsd, aoi, start, end, bands) -> ee.ImageCollection:
+    """Preprocess ALOS image."""
+    compute_ratio = lambda x: x.select("HH").divide(x.select("HV"))
+    return (
+        rsd.filterDate(start, end)
+        .filterBounds(aoi)
+        .select(bands)
+        .map(lambda x: x.convolve(ee.Kernel.square(1)))
+        .map(compute_ratio)
     )
-    return dataset
 
 
 def dem_processing_pipeline(dataset: DEM) -> ee.Image:
@@ -133,51 +132,49 @@ def dem_processing_pipeline(dataset: DEM) -> ee.Image:
     return dataset
 
 
-def processing_pipeline(dataset, aoi, dates=DateRanges()):
-    """Apply processing pipeline to dataset."""
-    # apply processing pipeline
-    # construct year ranges
-    if isinstance(dataset, S1):
-        # target 2019 spring to fall
-        # inacte the preprocessing pipeline
-        dataset = s1_preprocessing_pipeline(dataset, aoi, *dates.s1[0])
-        dataset = sar_processing_pipeline(dataset)
-        return dataset
+def processing_pipeline(aoi, s1, s2, alos, dem) -> ee.Image:
+    # s1 create a single year composite
+    s1_composite = sentinel_1_processor(
+        aoi=aoi,
+        rsd=s1.dataset,
+        start=s1.date[0][0],
+        end=s1.date[0][1],
+        bands=s1.bands,
+    ).median()
 
-    elif isinstance(dataset, S2):
-        # target 2018 - 2020 spring to fall
-        for start, end in dates.s2:
-            dataset = s2_preprocessing_pipeline(dataset, aoi, start, end)
-            dataset = optical_processing_pipeline(dataset)
-        return dataset
+    # s2 create a single year composite
+    s2_2018 = sentinel_2_processing(
+        aoi=aoi,
+        rsd=s2.dataset,
+        start=s2.date[0][0],
+        end=s2.date[0][1],
+        bands=s2.bands,
+    )
 
-    elif isinstance(dataset, ALOS):
-        # target 2018 - 2021 yearly composites
-        dataset = alos_preprocessing_pipeline(dataset, aoi, *dates.alos[0])
-        dataset = sar_processing_pipeline(dataset)
-        return dataset
-    else:
-        # dem
-        return dem_processing_pipeline(dataset)
+    s2_2019 = sentinel_2_processing(
+        aoi=aoi,
+        rsd=s2.dataset,
+        start=s2.date[1][0],
+        end=s2.date[1][1],
+        bands=s2.bands,
+    )
 
+    s2_2020 = sentinel_2_processing(
+        aoi=aoi,
+        rsd=s2.dataset,
+        start=s2.date[2][0],
+        end=s2.date[2][1],
+        bands=s2.bands,
+    )
 
-def composite_images(datasets) -> ee.Image:
-    """Composite images in the dataset."""
-    for dataset in datasets:
-        if (
-            isinstance(dataset, S1)
-            or isinstance(dataset, S2)
-            or isinstance(dataset, ALOS)
-        ):
-            dataset.dataset = dataset.dataset.median()
-        else:
-            dataset.dataset = dataset.dataset
-    return None
+    s2_composite = s2_2018.merge(s2_2019).merge(s2_2020).median()
 
+    # create multi year alos composite
+    # alos_composite = alos_processing(rsd=alos.dataset, aoi=aoi, start=alos.d).median()
 
-def stack_images(datasets) -> ee.Image:
-    """Stack images in the dataset."""
-    return ee.Image.cat(*datasets)
+    # create a dem composite
+    dem_composite = dem_processing_pipeline()
+    return ee.Image.cat(s1_composite, s2_composite, dem_composite)
 
 
 # Remote Sensing Datasets and Processing ends here
@@ -194,8 +191,8 @@ class Features:
         self.dataset = ee.FeatureCollection(self.dataset)
 
 
-def add_label_into_features(features: Features) -> Features:
-    """adds a column to the features dataset."""
+def remap_class_labels(features: Features) -> Features:
+    """remaps class labels to integers does in place modification of the dataset"""
     class_labels = features.dataset.aggregate_array(features.label_col).distinct()
     class_ints = ee.List.sequence(1, class_labels.size)
 
@@ -329,10 +326,46 @@ def monitor_task(task: ee.Task) -> None:
     print(task.status())
 
 
+# TODO add a click command line interface to run the script
 def main(args: list[str]) -> int:
+    feature_id = args[0]
+    aoi = args[1]
+
+    features = Features(feature_id, "class_name")
+    features = remap_class_labels(features)
+
+    # set up the remote sensing datasets
+    s1 = Sentinel1GRD()
+    s2 = Sentinel2TOA()
+    alos = ALOS()
+    dem = DEM()
+
+    # process the datasets
+    processed = processing_pipeline(features, s1, s2, alos, dem)
+
+    samples = extract(processed, features)
+
+    ## export to asset
+
+    # ee.Reset()
+
+    # Model assess and save
+    hyperparams = Hyperparameters(numberOfTrees=1000)
+    model = SmileRandomForest(hyperparams)
+    model.fit(
+        samples, predictors=["VV", "VH", "B2", "B3", "B4", "B8", "elevation", "slope"]
+    )
+    metrics = model.assess(samples)
+    # model.save("users/username/forest_model")
+
+    # metrics.save()
+
+    # monitor
+
+    # classify the image
+    stack = processing_pipeline(aoi, s1, s2, alos, dem)
+    classified = model.predict(stack)
+
+    # export to drive or cloud storage
+
     return 0
-
-
-if __name__ == "__main__":
-    ee.Initialize()
-    sys.exit(main(sys.argv[1:]))
