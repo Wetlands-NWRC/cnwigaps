@@ -4,6 +4,7 @@ import sys
 from typing import Any
 from dataclasses import dataclass, InitVar, field
 
+import click
 import ee
 
 
@@ -331,7 +332,9 @@ def main(args: list[str]) -> int:
     feature_id = args[0]
     aoi = args[1]
 
-    features = Features(feature_id, "class_name")
+    features = Features(
+        feature_id, "class_name"
+    )  # label col will need to have default value of "class_name"
     features = remap_class_labels(features)
 
     # set up the remote sensing datasets
