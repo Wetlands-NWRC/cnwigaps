@@ -9,14 +9,84 @@ import click
 import ee
 
 
+##~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~##
+# Datasets
 @dataclass
 class RemoteSensingDataset:
-    dataset_id: str
+    dataset_id: str | list[str]
     bands: list[str]
     date_range: tuple[str]
-    aoi: ee.FeatureCollection | ee.Geometry
+    aoi: ee.FeatureCollection | ee.Geometry | None = field(init=False, default=None)
 
 
+s1_2019 = RemoteSensingDataset(
+    dataset_id="COPERNICUS/S1_GRD",
+    bands=["VV", "VH"],
+    date_range=("2019-06-20", "2019-09-21"),
+)
+
+s2_2018 = RemoteSensingDataset(
+    dataset_id="COPERNICUS/S2_HARMONIZED",
+    bands=[
+        "B2",
+        "B3",
+        "B4",
+        "B5",
+        "B6",
+        "B7",
+        "B8",
+        "B8A",
+        "B11",
+        "B12",
+    ],
+    date_range=("2018-06-20", "2018-09-21"),
+)
+s2_2019 = RemoteSensingDataset(
+    dataset_id="COPERNICUS/S2_HARMONIZED",
+    bands=[
+        "B2",
+        "B3",
+        "B4",
+        "B5",
+        "B6",
+        "B7",
+        "B8",
+        "B8A",
+        "B11",
+        "B12",
+    ],
+    date_range=("2019-06-20", "2019-09-21"),
+)
+s2_2020 = RemoteSensingDataset(
+    dataset_id="COPERNICUS/S2_HARMONIZED",
+    bands=[
+        "B2",
+        "B3",
+        "B4",
+        "B5",
+        "B6",
+        "B7",
+        "B8",
+        "B8A",
+        "B11",
+        "B12",
+    ],
+    date_range=("2020-06-20", "2020-09-21"),
+)
+
+alos = RemoteSensingDataset(
+    dataset_id="JAXA/ALOS/PALSAR/YEARLY/SAR_EPOCH",
+    bands=["HH", "HV"],
+    date_range=("2018", "2021"),
+)
+
+dem = RemoteSensingDataset(
+    dataset_id=["NASA/NASADEM_HGT/001"], bands=["elevation"], date_range=("1")
+)
+##~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~##
+
+
+## Dataset Processors
 class RemoteSensingDatasetProcessor:
     def __init__(self, dataset=None) -> None:
         self.dataset = dataset
@@ -39,7 +109,14 @@ class RemoteSensingDatasetProcessor:
         return self
 
     def filter_date(self, dates: tuple[str]) -> RemoteSensingDatasetProcessor:
-        self._dataset = self._dataset.filterDate(*dates)
+        start, end = dates
+        self._dataset = self._dataset.filterDate(start, end)
+        return self
+
+    def cloud_filter(self, percent: int = 20):
+        self._dataset = self._dataset.filter(
+            ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", percent)
+        )
         return self
 
     def select(self, var_args: Any) -> RemoteSensingDatasetProcessor:
@@ -76,6 +153,7 @@ class RemoteSensingDatasetProcessor:
             return img.updateMask(mask)
 
         self._dataset = self._dataset.map(cloud_mask)
+        return self
 
     def add_boxcar(self, radius: int = 1) -> RemoteSensingDatasetProcessor:
         self._dataset = self._dataset.map(
@@ -107,7 +185,7 @@ class RemoteSensingDatasetProcessor:
 
     def compute_ndvi(self):
         self._dataset = self._dataset.map(
-            lambda x: x.addBands(x.normalizedDifference(["B8", "B4"]))
+            lambda x: x.addBands(x.normalizedDifference(["B8", "B4"]).rename("NDVI"))
         )
         return self
 
@@ -153,242 +231,110 @@ class RemoteSensingDatasetProcessor:
         return self._dataset
 
 
-# class Sentinel2Processing:
-#     def __init__(self):
-#         self.processor = RemoteSensingDatasetProcessor()
-
-#     def build_product(self, rsd: RemoteSensingDataset) -> :
-#         """exicutes the processing chain"""
-#         self.processor.dataset = rsd.dataset_id
-#         return (
-#             self.processor.
-#         )
-
-#     def build_multi_year_product(self, rsds: list[RemoteSensingDataset]):
-#         pass
-
-
 class Sentinel1Processing:
     def __init__(self) -> None:
         self.processor = RemoteSensingDatasetProcessor()
 
-    def build_products():
-        pass
-
-
-# Remote Sensing Datasets and Processing
-@dataclass
-class Sentinel1GRD:
-    dataset_id: str = field(default="COPERNICUS/S1_GRD")
-    bands: list = field(default_factory=lambda: ["VV", "VH"])
-    date: list = field(default_factory=lambda: [("2019-03-01", "2019-10-01")])
-
-    def __post_init__(self):
-        self.dataset = ee.ImageCollection(self.dataset_id)
-
-
-@dataclass
-class Sentinel2TOA:
-    dataset_id: str = field(default="COPERNICUS/S2")
-    bands: list = field(
-        default_factory=lambda: [
-            "B2",
-            "B3",
-            "B4",
-            "B5",
-            "B6",
-            "B7" "B8",
-            "B8A",
-            "B11",
-            "B12",
-        ]
-    )
-    date: list = field(
-        default_factory=lambda: [
-            ("2019-06-20", "2019-09-21"),
-            ("2019-06-20", "2019-09-21"),
-            ("2019-06-20", "2019-09-21"),
-        ]
-    )
-
-    def __post_init__(self):
-        self.dataset = ee.ImageCollection(self.dataset_id)
-
-
-def sentinel_2_processing(rsd, aoi, start, end, bands) -> ee.ImageCollection:
-    """Preprocess Sentinel-2 image."""
-
-    def cloud_mask(img: ee.Image):
-        """Apply cloud mask."""
-        qa = img.select("QA60")
-
-        # Bits 10 and 11 are clouds and cirrus, respectively.
-        cloud_bit_mask = 1 << 10
-        cirrus_bit_mask = 1 << 11
-
-        # Both flags should be set to zero, indicating clear conditions.
-        mask = (
-            qa.bitwiseAnd(cloud_bit_mask)
-            .eq(0)
-            .And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
+    def build_products(self, rsd: RemoteSensingDataset) -> ee.ImageCollection:
+        self.processor.dataset = rsd.dataset_id
+        return (
+            self.processor.filter_bounds(rsd.aoi)
+            .filter_date(rsd.date_range)
+            .filter_dv()
+            .select(rsd.bands)
+            .add_boxcar()
+            .compute_ratio("VV", "VH")
+            .build()
         )
 
-        return img.updateMask(mask)
 
-    def compute_savi(img: ee.Image):
-        """computes soil adjusted vegetation index."""
-        return img.addBands(
-            img.expression(
-                "1 + L * (NIR - RED) / (NIR + RED + L)",
-                {
-                    "NIR": img.select("B8"),
-                    "RED": img.select("B4"),
-                    "L": 0.5,
-                },
-            ).rename("SAVI")
+class Sentinel2Processing:
+    def __init__(self):
+        self.processor = RemoteSensingDatasetProcessor()
+
+    def build_products(self, rsd: RemoteSensingDataset) -> ee.ImageCollection:
+        self.processor.dataset = rsd.dataset_id
+        return (
+            self.processor.filter_bounds(rsd.aoi)
+            .filter_date(rsd.date_range)
+            .cloud_filter()
+            .s2_cloud_mask()
+            .select(rsd.bands)
+            .compute_ndvi()
+            .compute_savi()
+            .compute_tasseled_cap()
+            .build()
         )
 
-    def compute_tasseled_cap(img: ee.Image):
-        """computes tasseled cap transformation."""
-        coefficients = ee.Array(
-            [
-                [0.3029, 0.2786, 0.4733, 0.5599, 0.508, 0.1872],
-                [-0.2941, -0.243, -0.5424, 0.7276, 0.0713, -0.1608],
-                [0.1511, 0.1973, 0.3283, 0.3407, -0.7117, -0.4559],
-                [-0.8239, 0.0849, 0.4396, -0.058, 0.2013, -0.2773],
-                [-0.3294, 0.0557, 0.1056, 0.1855, -0.4349, 0.8085],
-                [0.1079, -0.9023, 0.4119, 0.0575, -0.0259, 0.0252],
-            ]
+    def build_multi_year_product(
+        self, rsds: list[RemoteSensingDataset]
+    ) -> ee.ImageCollection:
+        collection = None
+
+        for rsd in rsds:
+            inpt = self.build_products(rsd)
+
+            if collection is None:
+                collection = inpt
+            else:
+                collection.merge(inpt)
+        return collection
+
+
+class ALOSProcessing:
+    def __init__(self) -> None:
+        self.processor = RemoteSensingDatasetProcessor()
+
+    def build_products(self, rsd: RemoteSensingDataset) -> ee.ImageCollection:
+        self.processor.dataset = rsd.dataset_id
+        return (
+            self.processor.filter_bounds(rsd.aoi)
+            .filter_date(rsd.date_range)
+            .select(rsd.bands)
+            .add_boxcar()
+            .compute_ratio("HH", "HV")
+            .build()
         )
 
-        image_inpt = img.select(["B2", "B3", "B4", "B8", "B11", "B12"])
-        array_image = image_inpt.toArray()
-        array_image_2d = array_image.toArray(1)
 
-        components = (
-            ee.Image(coefficients)
-            .matrixMultiply(array_image_2d)
-            .arrayProject([0])
-            .arrayFlatten(
-                [["brightness", "greenness", "wetness", "fourth", "fifth", "sixth"]]
-            )
-        )
-        components = components.select(["brightness", "greenness", "wetness"])
-        return img.addBands(components)
+class DemProcessing:
+    def __init__(self):
+        self.processor = RemoteSensingDatasetProcessor()
 
-    # apply preprocessing pipeline
+    def build_products(self, rsd: RemoteSensingDataset) -> ee.ImageCollection:
+        self.processor.dataset = rsd.dataset_id
+        return self.processor.select("elevation").add_slope().build()
 
-    return (
-        rsd.filterDate(start, end)
-        .filterBounds(aoi)
-        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
-        .select(bands)
-        .map(cloud_mask)
-        .map(compute_savi)
-        .map(compute_tasseled_cap)
-        .map(lambda x: x.normalizedDifference(["B8", "B4"]).rename("NDVI"))
+
+def stack(aoi):
+    # sentinel 1
+    s1_2019.aoi = aoi
+    s1_proc = Sentinel1Processing().build_products(s1_2019)
+    s1_proc = s1_proc.median()
+    # sentinel 2
+    s2_2018.aoi = aoi
+    s2_2019.aoi = aoi
+    s2_2020.aoi = aoi
+
+    s2_proc = Sentinel2Processing().build_multi_year_product(
+        [s2_2018, s2_2019, s2_2020]
     )
+    s2_proc = s2_proc.median()
 
+    # alos
+    alos.aoi = aoi
+    al_proc = ALOSProcessing().build_products(alos)
+    al_proc = al_proc.median()
 
-@dataclass
-class ALOS:
-    dataset_id: str = field(default="JAXA/ALOS/PALSAR/YEARLY/SAR_EPOCH")
-    bands: list = field(default_factory=lambda: ["HH", "HV"])
-    date: list = field(default_factory=lambda: [("2018", "2021")])
+    # dem
+    dem_proc = DemProcessing().build_products(dem)
+    dem_proc = dem_proc.first()
 
-    def __post_init__(self):
-        self.dataset = ee.ImageCollection(self.dataset_id)
-
-
-def alos_processing(rsd, aoi, start, end, bands) -> ee.ImageCollection:
-    """Preprocess ALOS image."""
-    compute_ratio = lambda x: x.select("HH").divide(x.select("HV"))
-    return (
-        rsd.filterDate(start, end)
-        .filterBounds(aoi)
-        .select(bands)
-        .map(lambda x: x.convolve(ee.Kernel.square(1)))
-        .map(compute_ratio)
-    )
-
-
-@dataclass
-class DEM:
-    dataset_id: str = field(default="USGS/SRTMGL1_003")
-    bands: list = field(default_factory=lambda: ["elevation"])
-
-    def __post_init__(self):
-        self.dataset = ee.Image(self.dataset_id)
-
-
-def dem_processing_pipeline(dataset: DEM) -> ee.Image:
-    """Apply processing pipeline to DEM dataset."""
-    # apply processing pipeline
-    elevation = dataset.dataset.select(dataset.bands)
-    slope = ee.Terrain.slope(elevation)
-    dataset.dataset = dataset.dataset.addBands(slope)
-    return dataset
-
-
-def processing_pipeline(aoi, s1, s2, alos, dem) -> ee.Image:
-    # s1 create a single year composite
-    s1_composite = sentinel_1_processor(
-        aoi=aoi,
-        rsd=s1.dataset,
-        start=s1.date[0][0],
-        end=s1.date[0][1],
-        bands=s1.bands,
-    ).median()
-
-    # s2 create a single year composite
-    s2_2018 = sentinel_2_processing(
-        aoi=aoi,
-        rsd=s2.dataset,
-        start=s2.date[0][0],
-        end=s2.date[0][1],
-        bands=s2.bands,
-    )
-
-    s2_2019 = sentinel_2_processing(
-        aoi=aoi,
-        rsd=s2.dataset,
-        start=s2.date[1][0],
-        end=s2.date[1][1],
-        bands=s2.bands,
-    )
-
-    s2_2020 = sentinel_2_processing(
-        aoi=aoi,
-        rsd=s2.dataset,
-        start=s2.date[2][0],
-        end=s2.date[2][1],
-        bands=s2.bands,
-    )
-
-    s2_composite = s2_2018.merge(s2_2019).merge(s2_2020).median()
-
-    # create multi year alos composite
-    alos_composite = alos_processing(
-        rsd=alos.dataset, aoi=aoi, start=alos.date[0][0], end=alos.date[0][1]
-    )
-
-    # create a dem composite
-    dem_composite = dem_processing_pipeline()
-    return ee.Image.cat(s1_composite, s2_composite, alos_composite, dem_composite)
+    return ee.Image.cat(s1_proc, s2_proc, al_proc, dem_proc)
 
 
 # Remote Sensing Datasets and Processing ends here
 #########################################################################################
-
-
-# Data Engineering and Feature Extraction
-@dataclass
-class Features:
-    dataset: InitVar[str]  # TODO make init var
-    label_col: str
-
-    def __post_init__(self):
-        self.dataset = ee.FeatureCollection(self.dataset)
 
 
 def remap_class_labels(features: Features) -> Features:
@@ -402,18 +348,33 @@ def remap_class_labels(features: Features) -> Features:
     return features
 
 
-def extract(image, features: Features, **kwargs) -> Features:
-    """Extract features from the image."""
-    # extract features
+class Features:
+    def __init__(self, dataset, label_col: str):
+        self.dataset = dataset
+        self.label_col = label_col or "class_name"
 
-    features.dataset = image.sampleRegions(
-        collection=features.dataset,
-        propertie=kwargs.get("properties", []),
-        scale=kwargs.get("scale", 10),
-        tileScale=kwargs.get("tileScale", 16),
-        geometries=kwargs.get("geometries", True),
-    )
-    return features
+    def extract(
+        self,
+        image: ee.Image,
+        scale: int = 10,
+        tile_scale: int = 16,
+        geometries: bool = True,
+    ):
+        self.dataset = image.sampleRegions(
+            collection=self.dataset,
+            scale=scale,
+            tileScale=tile_scale,
+            geometries=geometries,
+        )
+        return self
+
+    def save_to_asset(self, asset_id: str, start: bool = True) -> ee.batch.Task:
+        task = ee.batch.Export.table.toAsset(
+            collection=self.dataset, description="", assetId=asset_id
+        )
+        if start:
+            task.start()
+        return task
 
 
 # Data Engineering and Feature Extraction ends here
@@ -533,28 +494,8 @@ def main(args: list[str]) -> int:
 
     features = ee.FeatureCollection(feature_id)
 
-    s1_dataset = RemoteSensingDataset(
-        dataset_id="COPERNICUS/S1_GRD",
-        bands=["VV", "VH"],
-        date_range=("2019-06-20", "2019-09-21"),
-        aoi=features,
-    )
-
-    procssor = RemoteSensingDatasetProcessor()
-
-    # S1 processing pipeline
-    # s1 = (
-    #     RemoteSensingDatasetProcessor(dataset=s1_dataset.dataset_id)
-    #     .filter_bounds(s1_dataset.aoi)
-    #     .filter_date(s1_dataset.date_range)
-    #     .filter_dv()
-    #     .select("V.*")
-    #     .add_boxcar()
-    #     .compute_ratio("VV", "VH")
-    #     .build()
-    # )
-
-    pprint(s1.first().getInfo())
+    inpts = stack(features)
+    pprint(inpts.bandNames().getInfo())
 
     return 0
 
