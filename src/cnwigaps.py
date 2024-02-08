@@ -335,23 +335,17 @@ def stack(aoi):
 
 # Remote Sensing Datasets and Processing ends here
 #########################################################################################
-
-
-def remap_class_labels(features: Features) -> Features:
-    """remaps class labels to integers does in place modification of the dataset"""
-    class_labels = features.dataset.aggregate_array(features.label_col).distinct()
-    class_ints = ee.List.sequence(1, class_labels.size)
-
-    features.dataset = features.dataset.remap(
-        class_labels, class_ints, features.label_col
-    )
-    return features
-
-
 class Features:
-    def __init__(self, dataset, label_col: str):
+    def __init__(self, dataset):
         self.dataset = dataset
-        self.label_col = label_col or "class_name"
+
+    @property
+    def dataset(self):
+        return self._dataset
+
+    @dataset.setter
+    def dataset(self, arg):
+        self._dataset = ee.FeatureCollection(arg)
 
     def extract(
         self,
@@ -360,8 +354,8 @@ class Features:
         tile_scale: int = 16,
         geometries: bool = True,
     ):
-        self.dataset = image.sampleRegions(
-            collection=self.dataset,
+        self._dataset = image.sampleRegions(
+            collection=self._dataset,
             scale=scale,
             tileScale=tile_scale,
             geometries=geometries,
@@ -487,15 +481,29 @@ def monitor_task(task: ee.Task) -> None:
     print(task.status())
 
 
+def split_asset(asset_str: str) -> tuple[str]:
+    """trims the string removing the last element"""
+    split = asset_str.split("/")
+    head = "/".join(split[:-2])
+    tail = split[-1]
+    return head, tail
+
+
 # TODO add a click command line interface to run the script
 def main(args: list[str]) -> int:
     feature_id = args[0]
     aoi = args[1]
 
-    features = ee.FeatureCollection(feature_id)
+    head, tail = split_asset(feature_id)
 
-    inpts = stack(features)
-    pprint(inpts.bandNames().getInfo())
+    features = Features(feature_id)
+    inpts = stack(features.dataset)
+
+    features.extract(inpts)
+    features_asset_id = f"{head}/{tail + '_samples'}"
+    task = features.save_to_asset(features_asset_id)
+    print("Saving Samples to Asset...")
+    monitor_task(task)
 
     return 0
 
