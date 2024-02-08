@@ -3,9 +3,177 @@ import sys
 
 from typing import Any
 from dataclasses import dataclass, InitVar, field
+from pprint import pprint
 
 import click
 import ee
+
+
+@dataclass
+class RemoteSensingDataset:
+    dataset_id: str
+    bands: list[str]
+    date_range: tuple[str]
+    aoi: ee.FeatureCollection | ee.Geometry
+
+
+class RemoteSensingDatasetProcessor:
+    def __init__(self, dataset=None) -> None:
+        self.dataset = dataset
+
+    @property
+    def dataset(self):
+        return self._dataset
+
+    @dataset.setter
+    def dataset(self, arg):
+        if arg is None:
+            self._dataset = arg
+        elif isinstance(arg, ee.ImageCollection):
+            self._dataset = arg
+        else:
+            self._dataset = ee.ImageCollection(arg)
+
+    def filter_bounds(self, aoi) -> RemoteSensingDatasetProcessor:
+        self._dataset = self._dataset.filterBounds(aoi)
+        return self
+
+    def filter_date(self, dates: tuple[str]) -> RemoteSensingDatasetProcessor:
+        self._dataset = self._dataset.filterDate(*dates)
+        return self
+
+    def select(self, var_args: Any) -> RemoteSensingDatasetProcessor:
+        self._dataset = self._dataset.select(var_args)
+        return self
+
+    def filter_dv(self, look_direction: str = None) -> RemoteSensingDatasetProcessor:
+        look_direction = look_direction or "DESCENDING"
+        self._dataset = (
+            self._dataset.filter(ee.Filter.eq("instrumentMode", "IW"))
+            .filter(ee.Filter.eq("orbitProperties_pass", look_direction))
+            .filter(ee.Filter.eq("resolution_meters", 10))
+            .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
+            .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
+        )
+        return self
+
+    def s2_cloud_mask(self):
+        def cloud_mask(img):
+            """Apply cloud mask."""
+            qa = img.select("QA60")
+
+            # Bits 10 and 11 are clouds and cirrus, respectively.
+            cloud_bit_mask = 1 << 10
+            cirrus_bit_mask = 1 << 11
+
+            # Both flags should be set to zero, indicating clear conditions.
+            mask = (
+                qa.bitwiseAnd(cloud_bit_mask)
+                .eq(0)
+                .And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
+            )
+
+            return img.updateMask(mask)
+
+        self._dataset = self._dataset.map(cloud_mask)
+
+    def add_boxcar(self, radius: int = 1) -> RemoteSensingDatasetProcessor:
+        self._dataset = self._dataset.map(
+            lambda x: x.convolve(ee.Kernel.square(radius)).set("boxcar", "True")
+        )
+        return self
+
+    def compute_ratio(self, b1, b2) -> RemoteSensingDatasetProcessor:
+        self._dataset = self._dataset.map(
+            lambda x: x.addBands(x.select(b1).divide(x.select(b2)).rename(f"{b1}_{b2}"))
+        )
+        return self
+
+    def compute_savi(self):
+        """computes soil adjusted vegetation index."""
+        self._dataset = self._dataset.map(
+            lambda x: x.addBands(
+                x.expression(
+                    "1 + L * (NIR - RED) / (NIR + RED + L)",
+                    {
+                        "NIR": x.select("B8"),
+                        "RED": x.select("B4"),
+                        "L": 0.5,
+                    },
+                ).rename("SAVI")
+            )
+        )
+        return self
+
+    def compute_ndvi(self):
+        self._dataset = self._dataset.map(
+            lambda x: x.addBands(x.normalizedDifference(["B8", "B4"]))
+        )
+        return self
+
+    def compute_tasseled_cap(self):
+        def compute_tasseled_cap(img: ee.Image):
+            """computes tasseled cap transformation."""
+            coefficients = ee.Array(
+                [
+                    [0.3029, 0.2786, 0.4733, 0.5599, 0.508, 0.1872],
+                    [-0.2941, -0.243, -0.5424, 0.7276, 0.0713, -0.1608],
+                    [0.1511, 0.1973, 0.3283, 0.3407, -0.7117, -0.4559],
+                    [-0.8239, 0.0849, 0.4396, -0.058, 0.2013, -0.2773],
+                    [-0.3294, 0.0557, 0.1056, 0.1855, -0.4349, 0.8085],
+                    [0.1079, -0.9023, 0.4119, 0.0575, -0.0259, 0.0252],
+                ]
+            )
+
+            image_inpt = img.select(["B2", "B3", "B4", "B8", "B11", "B12"])
+            array_image = image_inpt.toArray()
+            array_image_2d = array_image.toArray(1)
+
+            components = (
+                ee.Image(coefficients)
+                .matrixMultiply(array_image_2d)
+                .arrayProject([0])
+                .arrayFlatten(
+                    [["brightness", "greenness", "wetness", "fourth", "fifth", "sixth"]]
+                )
+            )
+            components = components.select(["brightness", "greenness", "wetness"])
+            return img.addBands(components)
+
+        self._dataset = self._dataset.map(compute_tasseled_cap)
+        return self
+
+    def add_slope(self):
+        self._dataset = self._dataset.map(
+            lambda x: x.addBands(ee.Terrain.slope(x.select("elevation")))
+        )
+        return self
+
+    def build(self):
+        return self._dataset
+
+
+# class Sentinel2Processing:
+#     def __init__(self):
+#         self.processor = RemoteSensingDatasetProcessor()
+
+#     def build_product(self, rsd: RemoteSensingDataset) -> :
+#         """exicutes the processing chain"""
+#         self.processor.dataset = rsd.dataset_id
+#         return (
+#             self.processor.
+#         )
+
+#     def build_multi_year_product(self, rsds: list[RemoteSensingDataset]):
+#         pass
+
+
+class Sentinel1Processing:
+    def __init__(self) -> None:
+        self.processor = RemoteSensingDatasetProcessor()
+
+    def build_products():
+        pass
 
 
 # Remote Sensing Datasets and Processing
@@ -22,17 +190,104 @@ class Sentinel1GRD:
 @dataclass
 class Sentinel2TOA:
     dataset_id: str = field(default="COPERNICUS/S2")
-    bands: list = field(default_factory=lambda: ["B2", "B3", "B4", "B8"])
+    bands: list = field(
+        default_factory=lambda: [
+            "B2",
+            "B3",
+            "B4",
+            "B5",
+            "B6",
+            "B7" "B8",
+            "B8A",
+            "B11",
+            "B12",
+        ]
+    )
     date: list = field(
         default_factory=lambda: [
-            ("2019-03-01", "2019-10-01"),
-            ("2019-03-01", "2019-10-01"),
-            ("2019-03-01", "2019-10-01"),
+            ("2019-06-20", "2019-09-21"),
+            ("2019-06-20", "2019-09-21"),
+            ("2019-06-20", "2019-09-21"),
         ]
     )
 
     def __post_init__(self):
         self.dataset = ee.ImageCollection(self.dataset_id)
+
+
+def sentinel_2_processing(rsd, aoi, start, end, bands) -> ee.ImageCollection:
+    """Preprocess Sentinel-2 image."""
+
+    def cloud_mask(img: ee.Image):
+        """Apply cloud mask."""
+        qa = img.select("QA60")
+
+        # Bits 10 and 11 are clouds and cirrus, respectively.
+        cloud_bit_mask = 1 << 10
+        cirrus_bit_mask = 1 << 11
+
+        # Both flags should be set to zero, indicating clear conditions.
+        mask = (
+            qa.bitwiseAnd(cloud_bit_mask)
+            .eq(0)
+            .And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
+        )
+
+        return img.updateMask(mask)
+
+    def compute_savi(img: ee.Image):
+        """computes soil adjusted vegetation index."""
+        return img.addBands(
+            img.expression(
+                "1 + L * (NIR - RED) / (NIR + RED + L)",
+                {
+                    "NIR": img.select("B8"),
+                    "RED": img.select("B4"),
+                    "L": 0.5,
+                },
+            ).rename("SAVI")
+        )
+
+    def compute_tasseled_cap(img: ee.Image):
+        """computes tasseled cap transformation."""
+        coefficients = ee.Array(
+            [
+                [0.3029, 0.2786, 0.4733, 0.5599, 0.508, 0.1872],
+                [-0.2941, -0.243, -0.5424, 0.7276, 0.0713, -0.1608],
+                [0.1511, 0.1973, 0.3283, 0.3407, -0.7117, -0.4559],
+                [-0.8239, 0.0849, 0.4396, -0.058, 0.2013, -0.2773],
+                [-0.3294, 0.0557, 0.1056, 0.1855, -0.4349, 0.8085],
+                [0.1079, -0.9023, 0.4119, 0.0575, -0.0259, 0.0252],
+            ]
+        )
+
+        image_inpt = img.select(["B2", "B3", "B4", "B8", "B11", "B12"])
+        array_image = image_inpt.toArray()
+        array_image_2d = array_image.toArray(1)
+
+        components = (
+            ee.Image(coefficients)
+            .matrixMultiply(array_image_2d)
+            .arrayProject([0])
+            .arrayFlatten(
+                [["brightness", "greenness", "wetness", "fourth", "fifth", "sixth"]]
+            )
+        )
+        components = components.select(["brightness", "greenness", "wetness"])
+        return img.addBands(components)
+
+    # apply preprocessing pipeline
+
+    return (
+        rsd.filterDate(start, end)
+        .filterBounds(aoi)
+        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
+        .select(bands)
+        .map(cloud_mask)
+        .map(compute_savi)
+        .map(compute_tasseled_cap)
+        .map(lambda x: x.normalizedDifference(["B8", "B4"]).rename("NDVI"))
+    )
 
 
 @dataclass
@@ -45,73 +300,6 @@ class ALOS:
         self.dataset = ee.ImageCollection(self.dataset_id)
 
 
-@dataclass
-class DEM:
-    dataset_id: str = field(default="USGS/SRTMGL1_003")
-    bands: list = field(default_factory=lambda: ["elevation"])
-
-    def __post_init__(self):
-        self.dataset = ee.Image(self.dataset_id)
-
-
-def sar_processing(dataset) -> ee.ImageCollection:
-    """Apply processing pipeline to SAR dataset."""
-    # apply processing pipeline
-    compute_ratio = lambda x: x.select(dataset.bands[0]).divide(
-        x.select(dataset.bands[1])
-    )
-    dataset.dataset = dataset.dataset.map(
-        lambda x: x.convolve(ee.Kernel.square(1))
-    ).map(compute_ratio)
-    return dataset
-
-
-def sentinel_1_processor(rsd, aoi, start, end, bands):
-    compute_ratio = lambda x: x.select("VV").divide(x.select("VH"))
-
-    return (
-        rsd.filterDate(start, end)
-        .filterBounds(aoi)
-        .filter(ee.Filter.eq("instrumentMode", "IW"))
-        .filter(ee.Filter.eq("orbitProperties_pass", "DESCENDING"))
-        .filter(ee.Filter.eq("resolution_meters", 10))
-        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
-        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
-        .select(bands)
-        .map(lambda x: x.convolve(ee.Kernel.square(1)))
-        .map(compute_ratio)
-    )
-
-
-def sentinel_2_processing(rsd, aoi, start, end, bands) -> ee.ImageCollection:
-    """Preprocess Sentinel-2 image."""
-
-    def cloud_mask(img: ee.Image):
-        """Apply cloud mask."""
-        ...
-
-    def compute_savi(img: ee.Image):
-        """computes soil adjusted vegetation index."""
-        ...
-
-    def compute_tasseled_cap(img: ee.Image):
-        """computes tasseled cap transformation."""
-        ...
-
-        # apply preprocessing pipeline
-
-        return (
-            rsd.filterDate(start, end)
-            .filterBounds(aoi)
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
-            .select(bands)
-            .map(cloud_mask)
-            .map(compute_savi)
-            .map(compute_tasseled_cap)
-            .map(lambda x: x.normalizedDifference(["B8", "B4"]).rename("NDVI"))
-        )
-
-
 def alos_processing(rsd, aoi, start, end, bands) -> ee.ImageCollection:
     """Preprocess ALOS image."""
     compute_ratio = lambda x: x.select("HH").divide(x.select("HV"))
@@ -122,6 +310,15 @@ def alos_processing(rsd, aoi, start, end, bands) -> ee.ImageCollection:
         .map(lambda x: x.convolve(ee.Kernel.square(1)))
         .map(compute_ratio)
     )
+
+
+@dataclass
+class DEM:
+    dataset_id: str = field(default="USGS/SRTMGL1_003")
+    bands: list = field(default_factory=lambda: ["elevation"])
+
+    def __post_init__(self):
+        self.dataset = ee.Image(self.dataset_id)
 
 
 def dem_processing_pipeline(dataset: DEM) -> ee.Image:
@@ -171,11 +368,13 @@ def processing_pipeline(aoi, s1, s2, alos, dem) -> ee.Image:
     s2_composite = s2_2018.merge(s2_2019).merge(s2_2020).median()
 
     # create multi year alos composite
-    # alos_composite = alos_processing(rsd=alos.dataset, aoi=aoi, start=alos.d).median()
+    alos_composite = alos_processing(
+        rsd=alos.dataset, aoi=aoi, start=alos.date[0][0], end=alos.date[0][1]
+    )
 
     # create a dem composite
     dem_composite = dem_processing_pipeline()
-    return ee.Image.cat(s1_composite, s2_composite, dem_composite)
+    return ee.Image.cat(s1_composite, s2_composite, alos_composite, dem_composite)
 
 
 # Remote Sensing Datasets and Processing ends here
@@ -332,43 +531,34 @@ def main(args: list[str]) -> int:
     feature_id = args[0]
     aoi = args[1]
 
-    features = Features(
-        feature_id, "class_name"
-    )  # label col will need to have default value of "class_name"
-    features = remap_class_labels(features)
+    features = ee.FeatureCollection(feature_id)
 
-    # set up the remote sensing datasets
-    s1 = Sentinel1GRD()
-    s2 = Sentinel2TOA()
-    alos = ALOS()
-    dem = DEM()
-
-    # process the datasets
-    processed = processing_pipeline(features, s1, s2, alos, dem)
-
-    samples = extract(processed, features)
-
-    ## export to asset
-
-    # ee.Reset()
-
-    # Model assess and save
-    hyperparams = Hyperparameters(numberOfTrees=1000)
-    model = SmileRandomForest(hyperparams)
-    model.fit(
-        samples, predictors=["VV", "VH", "B2", "B3", "B4", "B8", "elevation", "slope"]
+    s1_dataset = RemoteSensingDataset(
+        dataset_id="COPERNICUS/S1_GRD",
+        bands=["VV", "VH"],
+        date_range=("2019-06-20", "2019-09-21"),
+        aoi=features,
     )
-    metrics = model.assess(samples)
-    # model.save("users/username/forest_model")
 
-    # metrics.save()
+    procssor = RemoteSensingDatasetProcessor()
 
-    # monitor
+    # S1 processing pipeline
+    # s1 = (
+    #     RemoteSensingDatasetProcessor(dataset=s1_dataset.dataset_id)
+    #     .filter_bounds(s1_dataset.aoi)
+    #     .filter_date(s1_dataset.date_range)
+    #     .filter_dv()
+    #     .select("V.*")
+    #     .add_boxcar()
+    #     .compute_ratio("VV", "VH")
+    #     .build()
+    # )
 
-    # classify the image
-    stack = processing_pipeline(aoi, s1, s2, alos, dem)
-    classified = model.predict(stack)
-
-    # export to drive or cloud storage
+    pprint(s1.first().getInfo())
 
     return 0
+
+
+if __name__ == "__main__":
+    ee.Initialize()
+    sys.exit(main(sys.argv[1:]))
